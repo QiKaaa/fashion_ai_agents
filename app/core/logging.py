@@ -7,6 +7,17 @@ def setup_logging():
     # 移除默认处理器
     logger.remove()
     
+    # 设置控制台编码为UTF-8，防止乱码
+    if sys.platform == "win32":
+        # 在Windows上设置控制台编码
+        try:
+            import codecs
+            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach())
+            sys.stderr = codecs.getwriter('utf-8')(sys.stderr.detach())
+        except:
+            pass
+    
+
     # 添加控制台处理器
     logger.add(
         sys.stderr,

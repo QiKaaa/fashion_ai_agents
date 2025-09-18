@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v
         values = info.data
-        return PostgresDsn.build(
+        db_uri = PostgresDsn.build(
             scheme="postgresql",
             username=values.get("POSTGRES_USER"),
             password=values.get("POSTGRES_PASSWORD"),
@@ -46,10 +46,25 @@ class Settings(BaseSettings):
             port=values.get("POSTGRES_PORT"),
             path=f"/{values.get('POSTGRES_DB') or ''}",
         )
+        # 修复双斜杠问题，只替换路径中的双斜杠
+        uri_str = str(db_uri)
+        # 只替换路径部分的双斜杠，保持协议部分不变
+        if "/fashion_ai" in uri_str:
+            uri_str = uri_str.replace("//fashion_ai", "/fashion_ai")
+        return uri_str
     
     # 会话配置
     SESSION_TTL: int = int(os.getenv("SESSION_TTL", "3600"))  # 会话超时时间，默认1小时
     
+    # 阿里云百炼embedding配置
+    ALIYUN_API_KEY: str = os.getenv("ALIYUN_API_KEY", "")
+    ALIYUN_EMBEDDING_ENDPOINT: str = os.getenv("ALIYUN_EMBEDDING_ENDPOINT", "https://dashscope.aliyuncs.com")
+    ALIYUN_EMBEDDING_MODEL: str = os.getenv("ALIYUN_EMBEDDING_MODEL", "multimodal-embedding-v1")
+    
+    # 向量化配置
+    EMBEDDING_DIMENSION: int = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+    BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "10"))
+    MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
     # 应用配置
     PROJECT_NAME: str = "AI试衣多Agent智能体系统"
     

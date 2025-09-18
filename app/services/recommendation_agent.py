@@ -2,6 +2,119 @@ from typing import Dict, Any, Optional, List
 from app.core.logging import app_logger
 from app.models.memory import Memory, UserRequest, RecommendationResult, RecommendationItem
 from app.services.model_client import QwenVLClient
+import json
+from typing import List, Dict, Any, Optional
+from sqlalchemy import text
+from app.models.database import get_db
+from app.services.vectorization.embedding_service import AliyunEmbeddingService
+
+
+class RAGService:
+    """RAG检索服务，实现向量相似性搜索"""
+    
+    def __init__(self):
+        self.embedding_service = AliyunEmbeddingService()
+    
+    async def search_similar_products(
+        self, 
+        query_text: str, 
+        query_image: str,
+        filters: Dict[str, Any],
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """混合搜索：标签筛选 + 向量相似性"""
+        
+        try:
+            # 1. 向量化查询
+            text_vector = await self.embedding_service.embed_text(query_text)
+            image_vector = await self.embedding_service.embed_image(query_image)
+            
+            # 2. 构建查询条件
+            where_conditions = ["vector_status = 3"]  # 只查询已完成的向量
+            params = {
+                'text_vector': json.dumps(text_vector),
+                'image_vector': json.dumps(image_vector),
+                'limit': limit
+            }
+            
+            # 添加标签筛选条件
+            if 'scene' in filters and filters['scene']:
+                where_conditions.append("scene = :scene")
+                params['scene'] = filters['scene']
+            
+            if 'color' in filters and filters['color']:
+                where_conditions.append("color = :color")
+                params['color'] = filters['color']
+            
+            if 'style' in filters and filters['style']:
+                where_conditions.append("style = :style")
+                params['style'] = filters['style']
+            
+            if 'max_price' in filters and filters['max_price']:
+                where_conditions.append("price <= :max_price")
+                params['max_price'] = filters['max_price']
+            
+            # 3. 执行混合搜索
+            where_clause = " AND ".join(where_conditions)
+            
+            with next(get_db()) as db:
+                result = db.execute(text(f"""
+                    SELECT *, 
+                           text_vector <-> :text_vector AS text_distance,
+                           image_vector <-> :image_vector AS image_distance
+                    FROM product_vectors 
+                    WHERE {where_clause}
+                    ORDER BY (text_distance + image_distance) / 2
+                    LIMIT :limit
+                """), params)
+                
+                products = [dict(row) for row in result]
+                app_logger.info(f"RAG检索到 {len(products)} 个相似商品")
+                return products
+                
+        except Exception as e:
+            app_logger.error(f"RAG检索失败: {e}")
+            return []
+    
+    async def search_by_text_only(
+        self, 
+        query_text: str,
+        filters: Dict[str, Any],
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """仅基于文本的向量搜索"""
+        
+        try:
+            text_vector = await self.embedding_service.embed_text(query_text)
+            
+            where_conditions = ["vector_status = 3"]
+            params = {
+                'text_vector': json.dumps(text_vector),
+                'limit': limit
+            }
+            
+            # 添加筛选条件
+            if 'scene' in filters and filters['scene']:
+                where_conditions.append("scene = :scene")
+                params['scene'] = filters['scene']
+            
+            where_clause = " AND ".join(where_conditions)
+            
+            with next(get_db()) as db:
+                result = db.execute(text(f"""
+                    SELECT *, 
+                           text_vector <-> :text_vector AS distance
+                    FROM product_vectors 
+                    WHERE {where_clause}
+                    ORDER BY text_vector <-> :text_vector
+                    LIMIT :limit
+                """), params)
+                
+                return [dict(row) for row in result]
+                
+        except Exception as e:
+            app_logger.error(f"文本向量搜索失败: {e}")
+            return []
 
 
 class RecommendationAgent:
@@ -14,6 +127,7 @@ class RecommendationAgent:
             model_client: 模型客户端
         """
         self.model_client = model_client
+        self.rag_service = RAGService()  # 新增RAG服务
         # 定义服装类型
         self.clothing_types = ["上装", "下装"]
         # 定义风格类型
@@ -65,8 +179,19 @@ class RecommendationAgent:
             if request.style and request.style not in ["sports", "casual"]:
                 request.style = "casual"  # 默认使用休闲风格
                 
-            # 构建推荐提示词
-            prompt = self._build_recommendation_prompt(request, memory)
+            # RAG检索相关商品
+            similar_products = await self.rag_service.search_similar_products(
+                query_text=request.prompt,
+                query_image=request.image.image_url,
+                filters={
+                    'scene': request.style,
+                    'max_price': request.budget * 1.2  # 允许20%的价格浮动
+                },
+                limit=10
+            )
+            
+            # 构建增强提示词
+            prompt = self._build_rag_prompt(request, similar_products, memory)
             
             # 调用模型进行推荐
             image_data = {
@@ -294,3 +419,76 @@ class RecommendationAgent:
                 recommendations=[default_item],
                 reasoning=f"解析推荐结果失败: {e}"
             )
+
+    def _build_rag_prompt(self, request: UserRequest, similar_products: List[Dict], memory: Optional[Memory] = None) -> str:
+        """构建包含RAG检索结果的推荐提示词"""
+        
+        # 格式化检索到的商品信息
+        products_context = ""
+        if similar_products:
+            products_context = "\n\n相关商品信息（基于向量相似性搜索）：\n"
+            for i, product in enumerate(similar_products[:5], 1):
+                products_context += f"""
+商品{i}：
+- 名称：{product.get('product_name', '')}
+- 品牌：{product.get('brand', '')}
+- 价格：{product.get('price', 0)}元
+- 风格：{product.get('style', '')}
+- 颜色：{product.get('color', '')}
+- 场景：{product.get('scene', '')}
+- 描述：{product.get('description', '')}
+- 相似度：{product.get('text_distance', 0):.3f}
+"""
+        
+        # 基础提示词
+        prompt = """
+你是一位专业的时尚搭配顾问，需要根据用户上传的单品图片和提示词，推荐匹配的单品。
+
+请先分析用户上传的是上装还是下装，然后根据用户的提示词、预算范围和风格偏好，推荐3-5件匹配的单品。
+
+请按照以下格式回复：
+
+```json
+{
+  "recommendations": [
+    {
+      "item_type": "上装/下装",
+      "description": "详细描述",
+      "style": "风格类型",
+      "price_range": "价格范围",
+      "matching_reason": "匹配理由"
+    }
+  ],
+  "reasoning": "整体搭配理念和建议"
+}
+```
+
+请确保推荐的单品与用户上传的单品在风格、颜色、场合等方面协调匹配，并考虑用户的预算和风格偏好。
+"""
+        
+        # 添加用户信息
+        prompt += f"\n\n用户提示词: {request.prompt}"
+        
+        if request.budget:
+            prompt += f"\n预算范围: {request.budget}元"
+        
+        if request.style:
+            style_display = "运动" if request.style == "sports" else "休闲"
+            prompt += f"\n风格偏好: {style_display}"
+        
+        # 添加RAG检索结果
+        prompt += products_context
+        
+        # 添加历史记忆
+        if memory and memory.interactions:
+            previous_recommendations = [
+                interaction for interaction in memory.interactions 
+                if interaction.agent_type == "recommendation"
+            ]
+            
+            if previous_recommendations:
+                prompt += "\n\n用户之前的推荐历史："
+                for i, interaction in enumerate(previous_recommendations[-2:], 1):
+                    prompt += f"\n历史推荐{i}: 用户曾对{interaction.request.get('prompt', '未知单品')}进行搭配查询"
+        
+        return prompt
