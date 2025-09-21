@@ -1,5 +1,6 @@
 from sqlalchemy import Column, BigInteger, String, Text, DECIMAL, SmallInteger, DateTime, ARRAY, Float, JSON
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 from app.models.database import Base
 from typing import Dict, Any, Optional, List
 
@@ -28,8 +29,8 @@ class ProductVectors(Base):
     pattern = Column(String(50), nullable=True, comment="图案")
     
     # 向量字段（精筛）
-    text_vector = Column(String, nullable=True, comment="文本向量，1024维（JSON格式存储）")
-    image_vector = Column(String, nullable=True, comment="图片向量，1024维（JSON格式存储）")
+    text_vector = Column(Vector(1024), nullable=True, comment="文本向量，1024维（JSON格式存储）")
+    image_vector = Column(Vector(1024), nullable=True, comment="图片向量，1024维（JSON格式存储）")
     
     # 原始数据
     original_data = Column(JSON, nullable=True, comment="原始数据JSON，包含image_url和text_content")

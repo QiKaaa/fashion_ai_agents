@@ -24,11 +24,11 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD", "")
     
     # PostgreSQL配置
-    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_HOST: str = os.getenv("POSTGRES_SERVER", os.getenv("POSTGRES_HOST", "localhost"))
     POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
     POSTGRES_USER: str = os.getenv("POSTGRES_USER", "postgres")
     POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "postgres")
-    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "fashion_ai")
+    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "dabang")
     
     SQLALCHEMY_DATABASE_URI: Optional[PostgresDsn] = None
     
@@ -49,8 +49,8 @@ class Settings(BaseSettings):
         # 修复双斜杠问题，只替换路径中的双斜杠
         uri_str = str(db_uri)
         # 只替换路径部分的双斜杠，保持协议部分不变
-        if "/fashion_ai" in uri_str:
-            uri_str = uri_str.replace("//fashion_ai", "/fashion_ai")
+        if f"/{values.get('POSTGRES_DB')}" in uri_str:
+            uri_str = uri_str.replace(f"//{values.get('POSTGRES_DB')}", f"/{values.get('POSTGRES_DB')}")
         return uri_str
     
     # 会话配置

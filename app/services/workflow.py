@@ -123,6 +123,8 @@ class WorkflowManager:
             
             # 更新状态
             state["intent"] = intent
+            # 将更新后的请求保存回状态中（包含从文本中提取的预算和风格信息）
+            state["request"] = request.dict()
             
             # 初始化其他状态字段
             state["needs_more_info"] = False

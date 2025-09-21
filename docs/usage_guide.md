@@ -175,6 +175,44 @@ curl -X POST "http://localhost:8000/api/v1/chat" \
          }'
 ```
 
+单品推荐响应示例：
+```json
+{
+  "code": 200,
+  "message": "处理成功",
+  "data": {
+    "agent_type": "recommendation",
+    "result": {
+      "recommendations": [
+        {
+          "product_id": "1001",
+          "product_name": "运动休闲T恤",
+          "description": "纯棉材质，透气舒适，适合运动休闲场合",
+          "image_gif": "https://example.com/images/tshirt.jpg",
+          "category_id": "201",
+          "brand": "运动品牌",
+          "price": 199.99,
+          "scene": "sports",
+          "matching_reason": "这款T恤与您的上衣风格匹配，采用透气面料，适合运动场合"
+        },
+        {
+          "product_id": "1002",
+          "product_name": "休闲运动裤",
+          "description": "弹性面料，活动自如，适合日常运动和休闲穿着",
+          "image_gif": "https://example.com/images/pants.jpg",
+          "category_id": "202",
+          "brand": "休闲品牌",
+          "price": 299.99,
+          "scene": "casual",
+          "matching_reason": "这条裤子与您的上衣颜色协调，剪裁合身，适合休闲场合"
+        }
+      ],
+      "reasoning": "基于您的运动风格偏好和300元预算，为您推荐了2件匹配的单品，注重功能性和舒适度"
+    }
+  }
+}
+```
+
 ### 4. 时尚问答
 
 询问一般性时尚问题：

@@ -4,9 +4,11 @@ from app.models.memory import Memory, UserRequest, RecommendationResult, Recomme
 from app.services.model_client import QwenVLClient
 import json
 from typing import List, Dict, Any, Optional
-from sqlalchemy import text
-from app.models.database import get_db
+from sqlalchemy import text, and_, or_, func, join
+from app.models.database import get_db, SessionLocal
 from app.services.vectorization.embedding_service import AliyunEmbeddingService
+from app.models.product_vectors import ProductVectors
+from app.models.categories import Category
 
 
 class RAGService:
@@ -20,9 +22,10 @@ class RAGService:
         query_text: str, 
         query_image: str,
         filters: Dict[str, Any],
-        limit: int = 10
+        limit: int = 10,
+        exclude_category_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """混合搜索：标签筛选 + 向量相似性"""
+        """混合搜索：标签筛选 + 向量相似性 + 类别过滤"""
         
         try:
             # 1. 向量化查询
@@ -30,45 +33,64 @@ class RAGService:
             image_vector = await self.embedding_service.embed_image(query_image)
             
             # 2. 构建查询条件
-            where_conditions = ["vector_status = 3"]  # 只查询已完成的向量
-            params = {
-                'text_vector': json.dumps(text_vector),
-                'image_vector': json.dumps(image_vector),
-                'limit': limit
-            }
+            conditions = [ProductVectors.vector_status == 3]  # 只查询已完成的向量
             
             # 添加标签筛选条件
             if 'scene' in filters and filters['scene']:
-                where_conditions.append("scene = :scene")
-                params['scene'] = filters['scene']
+                conditions.append(ProductVectors.scene == filters['scene'])
             
             if 'color' in filters and filters['color']:
-                where_conditions.append("color = :color")
-                params['color'] = filters['color']
+                conditions.append(ProductVectors.color == filters['color'])
             
             if 'style' in filters and filters['style']:
-                where_conditions.append("style = :style")
-                params['style'] = filters['style']
+                conditions.append(ProductVectors.style == filters['style'])
             
             if 'max_price' in filters and filters['max_price']:
-                where_conditions.append("price <= :max_price")
-                params['max_price'] = filters['max_price']
+                conditions.append(ProductVectors.price <= filters['max_price'])
             
-            # 3. 执行混合搜索
-            where_clause = " AND ".join(where_conditions)
-            
-            with next(get_db()) as db:
-                result = db.execute(text(f"""
-                    SELECT *, 
-                           text_vector <-> :text_vector AS text_distance,
-                           image_vector <-> :image_vector AS image_distance
-                    FROM product_vectors 
-                    WHERE {where_clause}
-                    ORDER BY (text_distance + image_distance) / 2
-                    LIMIT :limit
-                """), params)
+            # 3. 使用SQLAlchemy ORM执行混合搜索
+            with SessionLocal() as session:
+                # 基础查询
+                query = session.query(
+                    ProductVectors,
+                    (ProductVectors.text_vector.l2_distance(text_vector)).label('text_similarity'),
+                    (ProductVectors.image_vector.l2_distance(image_vector)).label('image_similarity')
+                ).filter(and_(*conditions))
                 
-                products = [dict(row) for row in result]
+                # 添加类别过滤条件
+                if exclude_category_type:
+                    # 根据要排除的类别类型确定要保留的parent_id
+                    if exclude_category_type == "上装":
+                        # 排除上装，保留下装（parent_id=24）
+                        target_parent_id = 24
+                    elif exclude_category_type == "下装":
+                        # 排除下装，保留上装（parent_id=23）
+                        target_parent_id = 23
+                    else:
+                        target_parent_id = None
+                    
+                    if target_parent_id:
+                        # 添加与categories表的join和过滤条件
+                        query = query.join(
+                            Category, 
+                            ProductVectors.category_id == Category.id
+                        ).filter(Category.parent_id == target_parent_id)
+                
+                # 按相似度排序
+                query = query.order_by(
+                    'text_similarity', 
+                    'image_similarity'
+                ).limit(limit)
+                
+                results = query.all()
+                
+                products = []
+                for result in results:
+                    product_dict = result[0].to_dict()
+                    product_dict['text_similarity'] = float(result[1]) if result[1] is not None else None
+                    product_dict['image_similarity'] = float(result[2]) if result[2] is not None else None
+                    products.append(product_dict)
+                
                 app_logger.info(f"RAG检索到 {len(products)} 个相似商品")
                 return products
                 
@@ -179,7 +201,12 @@ class RecommendationAgent:
             if request.style and request.style not in ["sports", "casual"]:
                 request.style = "casual"  # 默认使用休闲风格
                 
-            # RAG检索相关商品
+            # 首先确定用户上传的是上装还是下装
+            # 这里需要调用模型分析图片类型，暂时使用简单逻辑
+            # 在实际应用中应该使用图像分类模型
+            clothing_type = self._analyze_clothing_type(request.image.image_url, request.prompt)
+            
+            # RAG检索相关商品，排除相同类型的服装
             similar_products = await self.rag_service.search_similar_products(
                 query_text=request.prompt,
                 query_image=request.image.image_url,
@@ -187,13 +214,14 @@ class RecommendationAgent:
                     'scene': request.style,
                     'max_price': request.budget * 1.2  # 允许20%的价格浮动
                 },
-                limit=10
+                limit=10,
+                exclude_category_type=clothing_type
             )
             
-            # 构建增强提示词
+            # 构建增强提示词，包含RAG检索结果
             prompt = self._build_rag_prompt(request, similar_products, memory)
             
-            # 调用模型进行推荐
+            # 调用模型生成匹配理由
             image_data = {
                 "image_url": request.image.image_url
             }
@@ -205,26 +233,34 @@ class RecommendationAgent:
                 max_tokens=1024
             )
             
-            # 解析推荐结果
+            # 解析推荐结果获取匹配理由
             result = self._parse_recommendation_result(response)
             
-            # 将 RecommendationResult 对象转换为字典
-            result_dict = {
-                "recommendations": [
-                    {
-                        "item_type": item.item_type,
-                        "description": item.description,
-                        "style": item.style,
-                        "price_range": item.price_range,
-                        "matching_reason": item.matching_reason
-                    } for item in result.recommendations
-                ],
-                "reasoning": result.reasoning
-            }
+            # 使用RAG检索结果构建推荐列表，但使用模型生成的匹配理由
+            recommendations = []
+            for i, product in enumerate(similar_products[:5]):  # 取前5个最相似的商品
+                # 使用模型生成的匹配理由，如果没有则使用默认理由
+                matching_reason = result.recommendations[i].matching_reason if i < len(result.recommendations) else f"与您的查询相似度: {product.get('text_similarity', 0):.3f}"
+                
+                recommendation = {
+                    "product_id": product.get("product_id", ""),
+                    "product_name": product.get("product_name", ""),
+                    "description": product.get("description", ""),
+                    "image_gif": product.get("image_gif", ""),
+                    "category_id": product.get("category_id", ""),
+                    "brand": product.get("brand", ""),
+                    "price": product.get("price", 0),
+                    "scene": product.get("scene", ""),
+                    "matching_reason": matching_reason
+                }
+                recommendations.append(recommendation)
             
             return {
                 "agent_type": "recommendation",
-                "result": result_dict
+                "result": {
+                    "recommendations": recommendations,
+                    "reasoning": result.reasoning
+                }
             }
             
         except Exception as e:
@@ -419,6 +455,35 @@ class RecommendationAgent:
                 recommendations=[default_item],
                 reasoning=f"解析推荐结果失败: {e}"
             )
+
+    def _analyze_clothing_type(self, image_url: str, prompt: str) -> str:
+        """分析服装类型（上装/下装）
+        
+        Args:
+            image_url: 图片URL
+            prompt: 用户提示词
+            
+        Returns:
+            "上装" 或 "下装"
+        """
+        # 简单逻辑：根据提示词判断
+        prompt_lower = prompt.lower()
+        
+        # 上装关键词
+        top_keywords = ["上衣", "衬衫", "T恤", "卫衣", "毛衣", "外套", "夹克", "西装", "大衣", "羽绒服"]
+        # 下装关键词  
+        bottom_keywords = ["裤子", "长裤", "短裤", "牛仔裤", "休闲裤", "运动裤", "裙子", "短裙", "长裙"]
+        
+        for keyword in top_keywords:
+            if keyword in prompt_lower:
+                return "上装"
+                
+        for keyword in bottom_keywords:
+            if keyword in prompt_lower:
+                return "下装"
+        
+        # 如果无法从提示词判断，默认返回"上装"
+        return "上装"
 
     def _build_rag_prompt(self, request: UserRequest, similar_products: List[Dict], memory: Optional[Memory] = None) -> str:
         """构建包含RAG检索结果的推荐提示词"""

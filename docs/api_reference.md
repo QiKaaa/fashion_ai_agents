@@ -95,7 +95,7 @@ POST /chat
   "session_id": "string", // 会话ID
   "text": "string", // 可选，用户文本输入
   "image": { // 可选，图片数据
-    "image_url": "string" // 图片URL，用于Qwen-VL-Plus模型
+    "image_url": "string" // 图片URL/base64，用于Qwen-VL-Plus模型
   },
   "prompt": "string", // 可选，用于单品推荐的提示词
   "budget": 0, // 可选，预算范围
@@ -103,7 +103,6 @@ POST /chat
 }
 ```
 
-> **重要更新**：图片数据模型已从Base64编码和MIME类型转换为使用image_url。请确保通过URL传递图片，而不是使用Base64编码。
 
 **响应**
 
@@ -152,11 +151,15 @@ POST /chat
 {
   "recommendations": [ // 推荐单品列表
     {
-      "item_type": "上装/下装", // 单品类型
-      "description": "详细描述", // 单品描述
-      "style": "风格类型", // 风格
-      "price_range": "价格范围", // 价格范围
-      "matching_reason": "匹配理由" // 匹配理由
+      "product_id": "商品ID", // 商品唯一标识
+      "product_name": "商品名称", // 商品名称
+      "description": "商品描述", // 商品详细描述
+      "image_gif": "商品图片URL", // 商品图片地址
+      "category_id": "分类ID", // 商品分类标识
+      "brand": "品牌名称", // 商品品牌
+      "price": 199.99, // 商品价格
+      "scene": "风格类型", // 适用场景/风格
+      "matching_reason": "匹配理由" // AI生成的匹配理由
     }
   ],
   "reasoning": "整体搭配理念和建议" // 推荐理由
