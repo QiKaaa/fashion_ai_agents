@@ -99,6 +99,17 @@ async def delete_session(
     app_logger.info(f"request: session_id={session_id}")
     
     try:
+        # 首先检查会话是否存在
+        if not agent_coordinator.memory_service.is_session_active(session_id):
+            app_logger.warning(f"会话不存在: {session_id}")
+            response = APIResponse[Dict[str, str]](
+                code=404,
+                message="会话不存在或已结束",
+                data={"session_id": session_id}
+            )
+            app_logger.info(f"response: {response.model_dump()}")
+            return response
+        
         # 清除会话记忆
         result = agent_coordinator.memory_service.clear_memory(session_id)
         
@@ -114,8 +125,8 @@ async def delete_session(
         else:
             app_logger.warning(f"结束会话失败: {session_id}")
             response = APIResponse[Dict[str, str]](
-                code=404,
-                message="会话不存在或已结束",
+                code=500,
+                message="结束会话失败",
                 data={"session_id": session_id}
             )
             app_logger.info(f"response: {response.model_dump()}")

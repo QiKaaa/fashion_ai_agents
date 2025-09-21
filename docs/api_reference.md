@@ -66,10 +66,22 @@ DELETE /sessions/{session_id}
 
 **响应**
 
+成功响应：
 ```json
 {
   "code": 200,
   "message": "会话已结束",
+  "data": {
+    "session_id": "string"
+  }
+}
+```
+
+会话不存在时的响应：
+```json
+{
+  "code": 404,
+  "message": "会话不存在或已结束",
   "data": {
     "session_id": "string"
   }

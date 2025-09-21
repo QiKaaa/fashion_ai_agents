@@ -379,6 +379,14 @@ class WorkflowManager:
             处理结果
         """
         try:
+            # 检查会话是否已被删除
+            if self._is_session_deleted(request.session_id):
+                app_logger.warning(f"会话已被删除: {request.session_id}")
+                return {
+                    "error": "会话已被删除，请创建新的会话",
+                    "agent_type": "default"
+                }
+            
             # 创建初始状态
             initial_state: AgentState = {
                 "session_id": request.session_id,
@@ -413,3 +421,20 @@ class WorkflowManager:
                 "error": f"运行工作流失败: {e}",
                 "agent_type": "default"
             }
+    
+    def _is_session_deleted(self, session_id: str) -> bool:
+        """检查会话是否已被删除
+        
+        Args:
+            session_id: 会话ID
+            
+        Returns:
+            True如果会话已被删除，False如果会话仍然存在
+        """
+        try:
+            # 使用内存服务的is_session_active方法检查会话状态
+            return not self.memory_service.is_session_active(session_id)
+        except Exception as e:
+            app_logger.error(f"检查会话状态失败: {e}")
+            # 出错时默认认为会话有效
+            return False
