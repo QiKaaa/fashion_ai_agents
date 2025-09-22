@@ -54,6 +54,15 @@ class MemoryService:
         try:
             # 序列化并保存记忆数据
             memory_dict = memory.dict()
+            # 将datetime字段转换为字符串
+            for interaction in memory_dict.get("interactions", []):
+                if "timestamp" in interaction:
+                    interaction["timestamp"] = interaction["timestamp"].isoformat()
+            if "created_at" in memory_dict:
+                memory_dict["created_at"] = memory_dict["created_at"].isoformat()
+            if "updated_at" in memory_dict:
+                memory_dict["updated_at"] = memory_dict["updated_at"].isoformat()
+                
             memory_data = json.dumps(memory_dict)
             self.redis_client.set(
                 f"memory:{memory.session_id}", 

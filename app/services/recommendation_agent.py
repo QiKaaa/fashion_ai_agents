@@ -22,7 +22,7 @@ class RAGService:
         query_text: str, 
         query_image: str,
         filters: Dict[str, Any],
-        limit: int = 10,
+        limit: int = 5,
         exclude_category_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """混合搜索：标签筛选 + 向量相似性 + 类别过滤"""
@@ -62,10 +62,10 @@ class RAGService:
                     # 根据要排除的类别类型确定要保留的parent_id
                     if exclude_category_type == "上装":
                         # 排除上装，保留下装（parent_id=24）
-                        target_parent_id = 24
+                        target_parent_id = 23
                     elif exclude_category_type == "下装":
                         # 排除下装，保留上装（parent_id=23）
-                        target_parent_id = 23
+                        target_parent_id = 24
                     else:
                         target_parent_id = None
                     
@@ -181,21 +181,57 @@ class RecommendationAgent:
                 }
             
             # 检查是否需要询问预算和风格偏好
-            if not request.budget or not request.style:
-                # 如果缺少预算或风格信息，返回询问信息
-                missing_info = []
-                if not request.budget:
-                    missing_info.append("预算")
-                if not request.style:
-                    missing_info.append("风格偏好")
-                
-                return {
-                    "agent_type": "recommendation",
-                    "need_more_info": True,
-                    "missing_info": missing_info,
-                    "message": f"为了给您提供更精准的搭配推荐，请告诉我您的{' 和 '.join(missing_info)}。",
-                    "style_options": ["sports", "casual"]  # 只支持运动和休闲两种风格
-                }
+            missing_info = []
+            
+            # 首先尝试从提示词中提取风格信息
+            if not request.style:
+                if "运动" in request.prompt or "sports" in request.prompt.lower():
+                    request.style = "sports"
+                elif "休闲" in request.prompt or "casual" in request.prompt.lower():
+                    request.style = "casual"
+            
+            # 检查预算
+            if not request.budget:
+                missing_info.append("预算")
+            
+            # 检查风格
+            if not request.style or request.style not in ["sports", "casual"]:
+                missing_info.append("风格偏好")
+                request.style = None  # 重置无效的风格值
+            
+            # 如果有缺失信息，返回询问信息
+            if missing_info:
+                # 检查是否已经询问过相同的信息
+                if memory and memory.interactions:
+                    last_interaction = memory.interactions[-1]
+                    if (last_interaction.agent_type == "recommendation" and 
+                        last_interaction.response.get("needs_more_info", False)):
+                        # 如果上次已经询问过相同的信息，直接进行推荐
+                        app_logger.warning(f"用户未提供完整信息，但已询问过相同缺失信息: {missing_info}")
+                        request.style = request.style or "casual"  # 设置默认风格
+                        request.budget = request.budget or 500  # 设置默认预算
+                    else:
+                        # 否则返回询问信息
+                        return {
+                            "agent_type": "recommendation",
+                            "needs_more_info": True,
+                            "missing_info": missing_info,
+                            "message": f"为了给您提供更精准的搭配推荐，请告诉我您的{' 和 '.join(missing_info)}。",
+                            "style_options": ["sports", "casual"]  # 只支持运动和休闲两种风格
+                        }
+                else:
+                    # 如果没有记忆，返回询问信息
+                    return {
+                        "agent_type": "recommendation",
+                        "needs_more_info": True,
+                        "missing_info": missing_info,
+                        "message": f"为了给您提供更精准的搭配推荐，请告诉我您的{' 和 '.join(missing_info)}。",
+                        "style_options": ["sports", "casual"]  # 只支持运动和休闲两种风格
+                    }
+            
+            # 确保风格值为有效选项
+            if request.style and request.style not in ["sports", "casual"]:
+                request.style = "casual"  # 默认使用休闲风格
                 
             # 确保风格值为有效选项
             if request.style and request.style not in ["sports", "casual"]:
@@ -204,7 +240,7 @@ class RecommendationAgent:
             # 首先确定用户上传的是上装还是下装
             # 这里需要调用模型分析图片类型，暂时使用简单逻辑
             # 在实际应用中应该使用图像分类模型
-            clothing_type = self._analyze_clothing_type(request.image.image_url, request.prompt)
+            clothing_type = await self._analyze_clothing_type(request.image.image_url, request.prompt)
             
             # RAG检索相关商品，排除相同类型的服装
             similar_products = await self.rag_service.search_similar_products(
@@ -255,11 +291,33 @@ class RecommendationAgent:
                 }
                 recommendations.append(recommendation)
             
+            # 生成自然语言描述
+            text_prompt = "请将以下推荐商品列表转换为自然语言描述，按以下要求：\n"
+            text_prompt += "1. 使用markdown格式输出。按商品分点输出，一项对应一件商品\n"
+            text_prompt += "2. 包含所有字段信息，英文字段名转换为中文\n"
+            text_prompt += "3. 保持原始数据不变\n"
+            text_prompt += "4. 每个商品之间用空行分隔。每个分点的标题使用二级标题\n"
+            text_prompt += "5. 每个商品的字段之间用空行分隔。字段名加粗。\n"
+            text_prompt += "6. 每个商品的字段名和字段值之间用冒号分隔\n"
+            text_prompt += "7. 使用markdown格式输出.如遇到图片也使用markdown图片格式输出。换行符使用 \n"
+            text_prompt += "8. 直接输出推荐内容，不要添加开头和结尾的自然语言转换说明\n"
+            text_prompt += "9. 输出的推荐内容以‘好的，这是我的推荐：’开头（不包括引号）”\n"
+            text_prompt += "\n---\n商品列表：" + json.dumps(recommendations[:5], ensure_ascii=False)
+
+            
+            text_response = await self.model_client.generate(
+                prompt=text_prompt,
+                temperature=0.5,
+                max_tokens=2048
+            )
+            text_output = self.model_client.extract_text_from_response(text_response)
+            
             return {
                 "agent_type": "recommendation",
                 "result": {
                     "recommendations": recommendations,
-                    "reasoning": result.reasoning
+                    "reasoning": result.reasoning,
+                    "text": text_output  # 新增自然语言描述
                 }
             }
             
@@ -456,7 +514,7 @@ class RecommendationAgent:
                 reasoning=f"解析推荐结果失败: {e}"
             )
 
-    def _analyze_clothing_type(self, image_url: str, prompt: str) -> str:
+    async def _analyze_clothing_type(self, image_url: str, prompt: str) -> str:
         """分析服装类型（上装/下装）
         
         Args:
@@ -466,24 +524,28 @@ class RecommendationAgent:
         Returns:
             "上装" 或 "下装"
         """
-        # 简单逻辑：根据提示词判断
-        prompt_lower = prompt.lower()
+        # 直接调用模型分析图片和文本
+        analysis_prompt = (
+            "你是分辨用户需要什么互补搭配的专家，擅长结合用户提示词和图片分析需要的服装类型。"
+            "具体来说，如果用户给出上装图片，或提示词里提到了他有上装，或提示词里提到了他需要搭配下装，你需要推荐下装；如果用户给出下装图片，或提示词里提到了他有下装，或提示词里提到了他需要搭配上装，你需要推荐上装。"
+            f"用户提示词: {prompt}"
+            "图片中的服装类型是: [图片分析]"
+            "请只回答'上装'或'下装'"
+        )
         
-        # 上装关键词
-        top_keywords = ["上衣", "衬衫", "T恤", "卫衣", "毛衣", "外套", "夹克", "西装", "大衣", "羽绒服"]
-        # 下装关键词  
-        bottom_keywords = ["裤子", "长裤", "短裤", "牛仔裤", "休闲裤", "运动裤", "裙子", "短裙", "长裙"]
+        app_logger.info(f"开始分析服装类型，图片URL: {image_url}, 提示词: {prompt}")
         
-        for keyword in top_keywords:
-            if keyword in prompt_lower:
-                return "上装"
-                
-        for keyword in bottom_keywords:
-            if keyword in prompt_lower:
-                return "下装"
+        response = await self.model_client.generate(
+            prompt=analysis_prompt,
+            image={"image_url": image_url},
+            max_tokens=10
+        )
+        result = self.model_client.extract_text_from_response(response)
         
-        # 如果无法从提示词判断，默认返回"上装"
-        return "上装"
+        clothing_type = "上装" if "上装" in result else "下装"
+        app_logger.info(f"服装类型分析结果: {clothing_type}, 模型原始输出: {result}")
+        
+        return clothing_type
 
     def _build_rag_prompt(self, request: UserRequest, similar_products: List[Dict], memory: Optional[Memory] = None) -> str:
         """构建包含RAG检索结果的推荐提示词"""

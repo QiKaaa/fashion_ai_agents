@@ -432,9 +432,23 @@ class WorkflowManager:
             True如果会话已被删除，False如果会话仍然存在
         """
         try:
+            # 首先检查会话ID是否有效
+            if not session_id or not isinstance(session_id, str):
+                app_logger.warning(f"无效的会话ID: {session_id}")
+                return True
+                
             # 使用内存服务的is_session_active方法检查会话状态
-            return not self.memory_service.is_session_active(session_id)
+            is_active = self.memory_service.is_session_active(session_id)
+            app_logger.debug(f"会话状态检查 - ID: {session_id}, 活跃状态: {is_active}")
+            
+            # 如果会话不活跃，再确认一次（防止Redis临时问题）
+            if not is_active:
+                app_logger.warning(f"会话可能已被删除，再次确认: {session_id}")
+                is_active = self.memory_service.is_session_active(session_id)
+                app_logger.debug(f"二次检查会话状态 - ID: {session_id}, 活跃状态: {is_active}")
+                
+            return not is_active
         except Exception as e:
             app_logger.error(f"检查会话状态失败: {e}")
-            # 出错时默认认为会话有效
+            # 出错时默认认为会话有效，避免误判
             return False
