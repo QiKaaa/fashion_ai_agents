@@ -301,7 +301,7 @@ class RecommendationAgent:
             text_prompt += "6. 每个商品的字段名和字段值之间用冒号分隔\n"
             text_prompt += "7. 使用markdown格式输出.如遇到图片也使用markdown图片格式输出。换行符使用 \n"
             text_prompt += "8. 直接输出推荐内容，不要添加开头和结尾的自然语言转换说明\n"
-            text_prompt += "9. 输出的推荐内容以‘好的，这是我的推荐：’开头（不包括引号）”\n"
+            text_prompt += "9. 输出的推荐内容以‘{推荐理由}’开头（不包括引号）”\n"
             text_prompt += "\n---\n商品列表：" + json.dumps(recommendations[:5], ensure_ascii=False)
 
             
@@ -311,7 +311,7 @@ class RecommendationAgent:
                 max_tokens=2048
             )
             text_output = self.model_client.extract_text_from_response(text_response)
-            
+            text_output = text_output.replace("{推荐理由}", result.reasoning)
             return {
                 "agent_type": "recommendation",
                 "result": {
