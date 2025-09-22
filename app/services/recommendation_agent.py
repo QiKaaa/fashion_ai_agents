@@ -292,26 +292,22 @@ class RecommendationAgent:
                 recommendations.append(recommendation)
             
             # 生成自然语言描述
-            text_prompt = "请将以下推荐商品列表转换为自然语言描述，按以下要求：\n"
-            text_prompt += "1. 使用markdown格式输出。按商品分点输出，一项对应一件商品\n"
-            text_prompt += "2. 包含所有字段信息，英文字段名转换为中文\n"
-            text_prompt += "3. 保持原始数据不变\n"
-            text_prompt += "4. 每个商品之间用空行分隔。每个分点的标题使用二级标题\n"
-            text_prompt += "5. 每个商品的字段之间用空行分隔。字段名加粗。\n"
-            text_prompt += "6. 每个商品的字段名和字段值之间用冒号分隔\n"
-            text_prompt += "7. 使用markdown格式输出.如遇到图片也使用markdown图片格式输出。换行符使用 \n"
-            text_prompt += "8. 直接输出推荐内容，不要添加开头和结尾的自然语言转换说明\n"
-            text_prompt += "9. 输出的推荐内容以‘{推荐理由}’开头（不包括引号）”\n"
-            text_prompt += "\n---\n商品列表：" + json.dumps(recommendations[:5], ensure_ascii=False)
-
+            # 生成自然语言描述
+            text_output = f"{result.reasoning}\n"
             
-            text_response = await self.model_client.generate(
-                prompt=text_prompt,
-                temperature=0.5,
-                max_tokens=2048
-            )
-            text_output = self.model_client.extract_text_from_response(text_response)
-            text_output = text_output.replace("{推荐理由}", result.reasoning)
+            for idx, product in enumerate(recommendations[:5], 1):
+                text_output += f"## {idx}. {product['product_name']}\n"
+                text_output += f"**商品id**: {product['product_id']}\n"
+                text_output += f"**商品名字**: {product['product_name']}\n"
+                text_output += f"**描述**: {product['description']}\n"
+                # text_output += f"**商品类别**: {product['category_id']}\n"
+                text_output += f"**品牌**: {product['brand']}\n"
+                text_output += f"**价格**: {product['price']}\n"
+                text_output += f"**风格类型**: {product['scene']}\n"
+                text_output += f"**推荐理由**: {product['matching_reason']}\n"
+                if product.get('image_gif'):
+                    text_output += f"![商品图片]({product['image_gif']})\n"                
+
             return {
                 "agent_type": "recommendation",
                 "result": {
