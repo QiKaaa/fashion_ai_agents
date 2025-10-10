@@ -166,19 +166,20 @@ class RecommendationAgent:
             推荐结果
         """
         try:
-            # 验证请求中是否包含图片
-            if not request.image:
+            # 验证请求：要么有图片+提示词，要么有文本描述
+            if not request.image and not request.text:
                 return {
-                    "error": "请提供单品图片",
+                    "error": "请提供单品图片或描述您想要的单品",
                     "agent_type": "recommendation"
                 }
                 
-            # 验证请求中是否包含提示词
-            if not request.prompt:
-                return {
-                    "error": "请提供搭配提示词",
-                    "agent_type": "recommendation"
-                }
+            # 如果有图片但没有提示词，使用文本作为提示词
+            if request.image and not request.prompt:
+                request.prompt = request.text or "请推荐匹配的单品"
+                
+            # 如果没有图片但有文本，使用文本作为提示词进行纯文本推荐
+            if not request.image and request.text:
+                request.prompt = request.text
             
             # 检查是否需要询问预算和风格偏好
             missing_info = []
@@ -237,30 +238,43 @@ class RecommendationAgent:
             if request.style and request.style not in ["sports", "casual"]:
                 request.style = "casual"  # 默认使用休闲风格
                 
-            # 首先确定用户上传的是上装还是下装
-            # 这里需要调用模型分析图片类型，暂时使用简单逻辑
-            # 在实际应用中应该使用图像分类模型
-            clothing_type = await self._analyze_clothing_type(request.image.image_url, request.prompt)
-            
-            # RAG检索相关商品，排除相同类型的服装
-            similar_products = await self.rag_service.search_similar_products(
-                query_text=request.prompt,
-                query_image=request.image.image_url,
-                filters={
-                    'scene': request.style,
-                    'max_price': request.budget * 1.2  # 允许20%的价格浮动
-                },
-                limit=10,
-                exclude_category_type=clothing_type
-            )
+            # 确定用户想要的服装类型
+            if request.image:
+                # 有图片时，分析图片类型
+                clothing_type = await self._analyze_clothing_type(request.image.image_url, request.prompt)
+                # RAG检索相关商品，排除相同类型的服装
+                similar_products = await self.rag_service.search_similar_products(
+                    query_text=request.prompt,
+                    query_image=request.image.image_url,
+                    filters={
+                        'scene': request.style,
+                        'max_price': request.budget * 1.2  # 允许20%的价格浮动
+                    },
+                    limit=10,
+                    exclude_category_type=clothing_type
+                )
+            else:
+                # 纯文本推荐，分析文本确定服装类型
+                clothing_type = await self._analyze_clothing_type_from_text(request.prompt)
+                # 使用纯文本RAG搜索
+                similar_products = await self.rag_service.search_by_text_only(
+                    query_text=request.prompt,
+                    filters={
+                        'scene': request.style,
+                        'max_price': request.budget * 1.2  # 允许20%的价格浮动
+                    },
+                    limit=10
+                )
             
             # 构建增强提示词，包含RAG检索结果
             prompt = self._build_rag_prompt(request, similar_products, memory)
             
             # 调用模型生成匹配理由
-            image_data = {
-                "image_url": request.image.image_url
-            }
+            image_data = None
+            if request.image:
+                image_data = {
+                    "image_url": request.image.image_url
+                }
             
             response = await self.model_client.generate(
                 prompt=prompt,
@@ -543,6 +557,35 @@ class RecommendationAgent:
         
         return clothing_type
 
+    async def _analyze_clothing_type_from_text(self, text: str) -> str:
+        """从文本中分析用户想要的服装类型（上装/下装）
+        
+        Args:
+            text: 用户文本描述
+            
+        Returns:
+            "上装" 或 "下装"
+        """
+        # 使用关键词匹配分析服装类型
+        upper_keywords = ["上衣", "衬衫", "T恤", "外套", "毛衣", "卫衣", "西装", "夹克", "背心", "上装"]
+        lower_keywords = ["裤子", "牛仔裤", "短裤", "长裤", "裙子", "短裙", "长裙", "下装", "裤装"]
+        
+        text_lower = text.lower()
+        
+        for keyword in upper_keywords:
+            if keyword in text_lower:
+                app_logger.info(f"从文本中识别到上装关键词: {keyword}")
+                return "上装"
+        
+        for keyword in lower_keywords:
+            if keyword in text_lower:
+                app_logger.info(f"从文本中识别到下装关键词: {keyword}")
+                return "下装"
+        
+        # 如果无法确定，默认返回上装（因为用户通常更容易描述上衣）
+        app_logger.info("无法从文本中确定服装类型，默认返回上装")
+        return "上装"
+
     def _build_rag_prompt(self, request: UserRequest, similar_products: List[Dict], memory: Optional[Memory] = None) -> str:
         """构建包含RAG检索结果的推荐提示词"""
         
@@ -564,11 +607,20 @@ class RecommendationAgent:
 """
         
         # 基础提示词
-        prompt = """
+        if request.image:
+            prompt = """
 你是一位专业的时尚搭配顾问，需要根据用户上传的单品图片和提示词，推荐匹配的单品。
 
 请先分析用户上传的是上装还是下装，然后根据用户的提示词、预算范围和风格偏好，推荐3-5件匹配的单品。
+"""
+        else:
+            prompt = """
+你是一位专业的时尚搭配顾问，需要根据用户的文本描述，推荐匹配的单品。
 
+请根据用户的描述、预算范围和风格偏好，推荐3-5件匹配的单品。
+"""
+
+        prompt += """
 请按照以下格式回复：
 
 ```json
@@ -586,7 +638,7 @@ class RecommendationAgent:
 }
 ```
 
-请确保推荐的单品与用户上传的单品在风格、颜色、场合等方面协调匹配，并考虑用户的预算和风格偏好。
+请确保推荐的单品符合用户的描述和需求，在风格、颜色、场合等方面协调匹配，并考虑用户的预算和风格偏好。
 """
         
         # 添加用户信息
