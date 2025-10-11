@@ -5,9 +5,10 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 import uuid
 from app.core.logging import app_logger
-from app.models.memory import UserRequest, ImageData, AgentResponse
+from app.models.memory import UserRequest, ImageData, AgentResponse, Memory
 from app.models.api import APIResponse, ErrorResponse
 from app.services.agent_coordinator import AgentCoordinator
+from app.services.memory_service import MemoryService
 from app.services.workflow import WorkflowManager
 
 
@@ -52,6 +53,9 @@ def get_agent_coordinator() -> AgentCoordinator:
     from app.main import agent_coordinator
     return agent_coordinator
 
+# 依赖项：获取记忆服务
+# def get_memory_service() -> MemoryService:
+#     return MemoryService()
 
 # 依赖项：获取工作流管理器
 def get_workflow_manager() -> WorkflowManager:
@@ -65,7 +69,7 @@ def get_workflow_manager() -> WorkflowManager:
 @router.post("/sessions", response_model=APIResponse[SessionData])
 async def create_session(
     request: SessionCreateRequest,
-    agent_coordinator: AgentCoordinator = Depends(get_agent_coordinator)
+    agent_coordinator: AgentCoordinator = Depends(get_agent_coordinator),
 ):
     """创建新会话"""
     app_logger.info(f"enter create_session")
@@ -75,6 +79,12 @@ async def create_session(
         # 生成会话ID
         session_id = str(uuid.uuid4())
         app_logger.info(f"创建新会话: {session_id}")
+        
+        # 创建初始记忆并存入Redis
+        memory = Memory(session_id=session_id)
+        if not agent_coordinator.memory_service.save_memory(memory):
+            app_logger.error(f"保存会话记忆失败: {session_id}")
+            raise HTTPException(status_code=500, detail="会话创建失败")
         
         # 返回会话ID
         response = APIResponse[SessionData](
@@ -99,6 +109,17 @@ async def delete_session(
     app_logger.info(f"request: session_id={session_id}")
     
     try:
+        # 首先检查会话是否存在
+        if not agent_coordinator.memory_service.is_session_active(session_id):
+            app_logger.warning(f"会话不存在: {session_id}")
+            response = APIResponse[Dict[str, str]](
+                code=404,
+                message="会话不存在或已结束",
+                data={"session_id": session_id}
+            )
+            app_logger.info(f"response: {response.model_dump()}")
+            return response
+        
         # 清除会话记忆
         result = agent_coordinator.memory_service.clear_memory(session_id)
         
@@ -114,8 +135,8 @@ async def delete_session(
         else:
             app_logger.warning(f"结束会话失败: {session_id}")
             response = APIResponse[Dict[str, str]](
-                code=404,
-                message="会话不存在或已结束",
+                code=500,
+                message="结束会话失败",
                 data={"session_id": session_id}
             )
             app_logger.info(f"response: {response.model_dump()}")

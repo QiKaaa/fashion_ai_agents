@@ -123,6 +123,8 @@ class WorkflowManager:
             
             # 更新状态
             state["intent"] = intent
+            # 将更新后的请求保存回状态中（包含从文本中提取的预算和风格信息）
+            state["request"] = request.dict()
             
             # 初始化其他状态字段
             state["needs_more_info"] = False
@@ -377,6 +379,14 @@ class WorkflowManager:
             处理结果
         """
         try:
+            # 检查会话是否已被删除
+            if self._is_session_deleted(request.session_id):
+                app_logger.warning(f"会话已被删除: {request.session_id}")
+                return {
+                    "error": "会话已被删除，请创建新的会话",
+                    "agent_type": "default"
+                }
+            
             # 创建初始状态
             initial_state: AgentState = {
                 "session_id": request.session_id,
@@ -411,3 +421,34 @@ class WorkflowManager:
                 "error": f"运行工作流失败: {e}",
                 "agent_type": "default"
             }
+    
+    def _is_session_deleted(self, session_id: str) -> bool:
+        """检查会话是否已被删除
+        
+        Args:
+            session_id: 会话ID
+            
+        Returns:
+            True如果会话已被删除，False如果会话仍然存在
+        """
+        try:
+            # 首先检查会话ID是否有效
+            if not session_id or not isinstance(session_id, str):
+                app_logger.warning(f"无效的会话ID: {session_id}")
+                return True
+                
+            # 使用内存服务的is_session_active方法检查会话状态
+            is_active = self.memory_service.is_session_active(session_id)
+            app_logger.debug(f"会话状态检查 - ID: {session_id}, 活跃状态: {is_active}")
+            
+            # 如果会话不活跃，再确认一次（防止Redis临时问题）
+            if not is_active:
+                app_logger.warning(f"会话可能已被删除，再次确认: {session_id}")
+                is_active = self.memory_service.is_session_active(session_id)
+                app_logger.debug(f"二次检查会话状态 - ID: {session_id}, 活跃状态: {is_active}")
+                
+            return not is_active
+        except Exception as e:
+            app_logger.error(f"检查会话状态失败: {e}")
+            # 出错时默认认为会话有效，避免误判
+            return False

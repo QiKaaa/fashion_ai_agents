@@ -29,6 +29,17 @@ class IntentRecognizer:
             意图类型: "scoring", "recommendation", "default"
         """
         try:
+            # 特殊处理：如果用户只是回复文本信息（没有图片），且历史记录显示之前需要更多信息
+            if (memory and memory.interactions and 
+                not request.image and request.text and 
+                len(memory.interactions) > 0):
+                last_interaction = memory.interactions[-1]
+                if (isinstance(last_interaction.response, dict) and 
+                    last_interaction.response.get('needs_more_info', False) and
+                    last_interaction.agent_type == "recommendation"):
+                    app_logger.info("检测到用户回复预算/风格信息，继续recommendation意图")
+                    return "recommendation"
+            
             # 首先从自然语言中提取预算和风格信息
             if request.text and (not request.budget or not request.style):
                 extracted_info = await self._extract_budget_and_style(request.text)
@@ -85,12 +96,33 @@ class IntentRecognizer:
         prompt = """
 你是一个意图识别助手，需要根据用户的输入判断用户的意图类型。可能的意图类型有：
 
-1. scoring（试衣评分）：用户提供了穿搭图片，希望对穿搭进行评分和建议。
-2. recommendation（单品推荐）：用户提供了单品图片（上装或下装）和提示词，希望推荐匹配的单品。
-3. default（一般问题）：用户询问与时尚相关的一般性问题。
+1. scoring（试衣评分）：用户提供了完整的穿搭图片（包含上衣和裤子/裙子等完整搭配），希望对整体穿搭进行评分和建议。
+2. recommendation（单品推荐）：用户希望推荐具体的单品，包括：
+   - 提供单品图片并询问搭配建议（互补推荐）
+   - 纯文本描述想要的具体单品（如"推荐一件白色上衣"、"我要买一条牛仔裤"等）
+3. default（一般问题）：用户询问与时尚相关的一般性问题，没有提供图片或只询问知识性问题。
 
-请分析用户输入，并只返回一个意图类型（scoring、recommendation或default）。
+判断规则：
+- 如果用户提供的是单品图片并询问搭配建议 → recommendation
+- 如果用户提供的是完整穿搭图片并询问评分 → scoring  
+- 如果用户明确描述想要的具体单品（如"白色上衣"、"牛仔裤"、"运动鞋"等）→ recommendation
+- 如果用户只询问时尚知识或一般性问题 → default
 
+--
+这里是一些常见的用户输入的例子，能帮助你更好地进行意图识别：
+
++ 用户输入：给我的衣服搭配（提供单品图片） 意图类型：recommendation
++ 用户输入：帮我推荐搭配这件上衣的裤子（提供单品图片） 意图类型：recommendation
++ 用户输入：推荐一件白色上衣 意图类型：recommendation
++ 用户输入：我要买一条牛仔裤 意图类型：recommendation
++ 用户输入：帮我找一件运动风格的T恤 意图类型：recommendation
++ 用户输入：我想要试穿这件衣服，你觉得怎么样？（提供完整穿搭图片） 意图类型：scoring
++ 用户输入：这套衣服好看吗？（提供完整穿搭图片） 意图类型：scoring
++ 用户输入：这套搭配怎么样？（提供完整穿搭图片） 意图类型：scoring
++ 用户输入：你可以干什么？ 意图类型：default
+
+--
+现在，根据以下信息，判断用户的意图类型（只返回scoring、recommendation或default中的一个）：
 用户输入：
 """
         
@@ -123,6 +155,21 @@ class IntentRecognizer:
                 prompt += f"\n交互{i+1} - 类型: {interaction.agent_type}"
                 if "text" in interaction.request:
                     prompt += f", 用户输入: {interaction.request.get('text', '')}"
+                # 如果之前的交互需要更多信息，说明这是对之前请求的补充
+                if isinstance(interaction.response, dict) and interaction.response.get('needs_more_info', False):
+                    prompt += f", 需要更多信息: {interaction.response.get('missing_info', [])}"
+        
+        # 特别处理：如果历史对话显示之前需要更多信息，且当前用户只是提供了文本信息（没有图片），
+        # 这很可能是对之前请求的补充信息
+        if (memory and memory.interactions and 
+            not request.image and request.text and 
+            len(memory.interactions) > 0):
+            last_interaction = memory.interactions[-1]
+            if (isinstance(last_interaction.response, dict) and 
+                last_interaction.response.get('needs_more_info', False) and
+                last_interaction.agent_type == "recommendation"):
+                missing_info = last_interaction.response.get('missing_info', [])
+                prompt += f"\n\n重要提示：用户之前请求了recommendation但缺少信息{missing_info}，现在只提供了文本回复（可能是预算或风格信息），这应该继续作为recommendation意图处理。"
         
         prompt += "\n\n请根据以上信息，判断用户的意图类型（只返回scoring、recommendation或default中的一个）："
         

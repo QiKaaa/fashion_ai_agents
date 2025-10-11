@@ -54,6 +54,15 @@ class MemoryService:
         try:
             # 序列化并保存记忆数据
             memory_dict = memory.dict()
+            # 将datetime字段转换为字符串
+            for interaction in memory_dict.get("interactions", []):
+                if "timestamp" in interaction:
+                    interaction["timestamp"] = interaction["timestamp"].isoformat()
+            if "created_at" in memory_dict:
+                memory_dict["created_at"] = memory_dict["created_at"].isoformat()
+            if "updated_at" in memory_dict:
+                memory_dict["updated_at"] = memory_dict["updated_at"].isoformat()
+                
             memory_data = json.dumps(memory_dict)
             self.redis_client.set(
                 f"memory:{memory.session_id}", 
@@ -76,6 +85,24 @@ class MemoryService:
         except Exception as e:
             app_logger.error(f"清除会话记忆失败: {e}")
             return False
+    
+    def is_session_active(self, session_id: str) -> bool:
+        """检查会话是否活跃（未被删除）
+        
+        Args:
+            session_id: 会话ID
+            
+        Returns:
+            True如果会话活跃，False如果会话已被删除
+        """
+        try:
+            # 直接检查Redis中是否存在该会话的key
+            key_exists = self.redis_client.exists(f"memory:{session_id}")
+            return bool(key_exists)
+        except Exception as e:
+            app_logger.error(f"检查会话状态失败: {e}")
+            # 出错时默认认为会话活跃
+            return True
     
     def add_interaction(self, session_id: str, agent_type: str, request: UserRequest, response: AgentResponse) -> bool:
         """添加交互记录"""
