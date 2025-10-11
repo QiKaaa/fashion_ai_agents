@@ -120,9 +120,20 @@ class RAGService:
                 where_conditions.append("scene = :scene")
                 params['scene'] = filters['scene']
             
+            if 'color' in filters and filters['color']:
+                where_conditions.append("color = :color")
+                params['color'] = filters['color']
+            
+            if 'max_price' in filters and filters['max_price']:
+                where_conditions.append("price <= :max_price")
+                params['max_price'] = filters['max_price']
+            
             where_clause = " AND ".join(where_conditions)
             
             with next(get_db()) as db:
+                app_logger.info(f"执行RAG文本搜索，查询条件: {where_clause}")
+                app_logger.info(f"搜索参数: {params}")
+                
                 result = db.execute(text(f"""
                     SELECT *, 
                            text_vector <-> :text_vector AS distance
@@ -132,7 +143,24 @@ class RAGService:
                     LIMIT :limit
                 """), params)
                 
-                return [dict(row) for row in result]
+                # 安全地转换结果
+                products = []
+                row_count = 0
+                for row in result:
+                    row_count += 1
+                    try:
+                        # 将SQLAlchemy Row对象转换为字典
+                        row_dict = {}
+                        for key, value in row._mapping.items():
+                            row_dict[key] = value
+                        products.append(row_dict)
+                        app_logger.debug(f"成功转换第{row_count}行数据")
+                    except Exception as e:
+                        app_logger.warning(f"转换第{row_count}行数据失败: {e}, 跳过该行")
+                        continue
+                
+                app_logger.info(f"RAG文本搜索完成，共处理{row_count}行，成功转换{len(products)}个商品")
+                return products
                 
         except Exception as e:
             app_logger.error(f"文本向量搜索失败: {e}")
@@ -172,6 +200,44 @@ class RecommendationAgent:
                     "error": "请提供单品图片或描述您想要的单品",
                     "agent_type": "recommendation"
                 }
+            
+            # 如果是纯文本推荐，验证文本是否包含具体的单品描述
+            if not request.image and request.text:
+                # 检查文本是否包含具体的单品描述关键词（基于数据库分类）
+                clothing_keywords = [
+                    # 上装类别
+                    "上衣", "上装",  # 添加通用上装关键词
+                    "针织毛衫", "毛衣", "毛衫", "针织衫",
+                    "T恤", "t恤", "polo", "POLO", "polo衫",
+                    "衬衫", "衬衣", "白衬衫",
+                    "连衣裙", "长裙", "连身裙",
+                    "风衣", "长风衣",
+                    "卫衣", "连帽衫", "帽衫",
+                    "皮革", "皮衣", "皮夹克",
+                    "背心", "吊带", "背心/吊带",
+                    "夹克", "外套", "夹克/外套",
+                    "大衣", "长外套", "风衣大衣",
+                    "棉服", "羽绒服", "棉服/羽绒服",
+                    "内衣", "泳衣", "内衣/泳衣",
+                    "家居服", "睡衣",
+                    "礼服", "旗袍", "礼服/旗袍",
+                    "套装", "西装套装",
+                    "西装", "西装凸甲",
+                    # 下装类别
+                    "下装", "下衣",  # 添加通用下装关键词
+                    "牛仔", "牛仔裤",
+                    "长裤", "裤子", "西裤", "休闲裤",
+                    "短裤", "热裤",
+                    "半身裙", "短裙", "裙装"
+                ]
+                text_lower = request.text.lower()
+                has_clothing_keyword = any(keyword in text_lower for keyword in clothing_keywords)
+                
+                if not has_clothing_keyword:
+                    return {
+                        "error": "请描述您想要的具体单品，例如：推荐一件白色T恤、我要买一条牛仔裤、找件风衣等",
+                        "agent_type": "recommendation"
+                    }
             
             # 验证图片URL是否有效
             if request.image and request.image.image_url:
@@ -267,17 +333,32 @@ class RecommendationAgent:
                     exclude_category_type=clothing_type
                 )
             else:
-                # 纯文本推荐，分析文本确定服装类型
+                # 纯文本推荐，分析文本确定服装类型和颜色
                 clothing_type = await self._analyze_clothing_type_from_text(request.prompt)
+                extracted_color = self._extract_color_from_text(request.prompt)
+                
+                # 构建搜索过滤器
+                search_filters = {
+                    'scene': request.style,
+                    'max_price': request.budget * 1.2  # 允许20%的价格浮动
+                }
+                
+                # 如果提取到颜色信息，添加到过滤器中
+                if extracted_color:
+                    search_filters['color'] = extracted_color
+                
+                app_logger.info(f"纯文本推荐 - 服装类型: {clothing_type}, 提取颜色: {extracted_color}")
+                app_logger.info(f"纯文本推荐 - 搜索过滤器: {search_filters}")
+                app_logger.info(f"纯文本推荐 - 查询文本: {request.prompt}")
+                
                 # 使用纯文本RAG搜索
                 similar_products = await self.rag_service.search_by_text_only(
                     query_text=request.prompt,
-                    filters={
-                        'scene': request.style,
-                        'max_price': request.budget * 1.2  # 允许20%的价格浮动
-                    },
+                    filters=search_filters,
                     limit=10
                 )
+                
+                app_logger.info(f"纯文本推荐 - RAG搜索结果数量: {len(similar_products)}")
             
             # 构建增强提示词，包含RAG检索结果
             prompt = self._build_rag_prompt(request, similar_products, memory)
@@ -579,9 +660,36 @@ class RecommendationAgent:
         Returns:
             "上装" 或 "下装"
         """
-        # 使用关键词匹配分析服装类型
-        upper_keywords = ["上衣", "衬衫", "T恤", "外套", "毛衣", "卫衣", "西装", "夹克", "背心", "上装"]
-        lower_keywords = ["裤子", "牛仔裤", "短裤", "长裤", "裙子", "短裙", "长裙", "下装", "裤装"]
+        # 基于数据库中的分类数据匹配服装类型
+        # 上装类别 (parent_id = 23)
+        upper_keywords = [
+            "上衣", "上装",  # 添加通用上装关键词
+            "针织毛衫", "毛衣", "毛衫", "针织衫",
+            "T恤", "t恤", "polo", "POLO", "polo衫",
+            "衬衫", "衬衣", "白衬衫",
+            "连衣裙", "长裙", "连身裙",
+            "风衣", "长风衣",
+            "卫衣", "连帽衫", "帽衫",
+            "皮革", "皮衣", "皮夹克",
+            "背心", "吊带", "背心/吊带",
+            "夹克", "外套", "夹克/外套",
+            "大衣", "长外套", "风衣大衣",
+            "棉服", "羽绒服", "棉服/羽绒服",
+            "内衣", "泳衣", "内衣/泳衣",
+            "家居服", "睡衣",
+            "礼服", "旗袍", "礼服/旗袍",
+            "套装", "西装套装",
+            "西装", "西装凸甲"
+        ]
+        
+        # 下装类别 (parent_id = 24)
+        lower_keywords = [
+            "下装", "下衣",  # 添加通用下装关键词
+            "牛仔", "牛仔裤",
+            "长裤", "裤子", "西裤", "休闲裤",
+            "短裤", "热裤",
+            "半身裙", "短裙", "裙装"
+        ]
         
         text_lower = text.lower()
         
@@ -598,6 +706,40 @@ class RecommendationAgent:
         # 如果无法确定，默认返回上装（因为用户通常更容易描述上衣）
         app_logger.info("无法从文本中确定服装类型，默认返回上装")
         return "上装"
+    
+    def _extract_color_from_text(self, text: str) -> Optional[str]:
+        """从文本中提取颜色信息
+        
+        Args:
+            text: 用户文本描述
+            
+        Returns:
+            颜色字符串或None
+        """
+        # 基于数据库中的颜色数据映射
+        color_keywords = {
+            "黑色": ["黑色", "黑", "纯黑", "深黑"],
+            "白色": ["白色", "白", "纯白", "雪白"],
+            "红色": ["红色", "红", "大红", "深红", "鲜红"],
+            "蓝色": ["蓝色", "蓝", "深蓝", "浅蓝", "天蓝", "宝蓝"],
+            "绿色": ["绿色", "绿", "深绿", "浅绿", "草绿"],
+            "黄色": ["黄色", "黄", "深黄", "浅黄", "金黄"],
+            "紫色": ["紫色", "紫", "深紫", "浅紫", "薰衣草紫"],
+            "灰色": ["灰色", "灰", "深灰", "浅灰", "银灰"],
+            "粉色": ["粉色", "粉", "深粉", "浅粉", "玫瑰粉"],
+            "米色": ["米色", "米白", "浅米", "奶白"],
+            "卡其色": ["卡其色", "卡其", "土黄", "驼色"]
+        }
+        
+        text_lower = text.lower()
+        
+        for color, keywords in color_keywords.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    app_logger.info(f"从文本中识别到颜色: {color}")
+                    return color
+        
+        return None
 
     def _build_rag_prompt(self, request: UserRequest, similar_products: List[Dict], memory: Optional[Memory] = None) -> str:
         """构建包含RAG检索结果的推荐提示词"""
