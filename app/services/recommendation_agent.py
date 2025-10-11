@@ -172,6 +172,19 @@ class RecommendationAgent:
                     "error": "请提供单品图片或描述您想要的单品",
                     "agent_type": "recommendation"
                 }
+            
+            # 验证图片URL是否有效
+            if request.image and request.image.image_url:
+                # 检查图片URL是否有效（不是空字符串、'string'等无效值）
+                if (not request.image.image_url or 
+                    request.image.image_url.strip() == '' or 
+                    request.image.image_url == 'string' or
+                    not request.image.image_url.startswith(('http://', 'https://'))):
+                    app_logger.warning(f"无效的图片URL: {request.image.image_url}")
+                    return {
+                        "error": "请提供有效的单品图片URL",
+                        "agent_type": "recommendation"
+                    }
                 
             # 如果有图片但没有提示词，使用文本作为提示词
             if request.image and not request.prompt:
